@@ -1,5 +1,10 @@
-// app/api/game/[...action]/route.js - With Vercel KV Storage
+// app/api/game/[...action]/route.js - With Vercel KV Storage and Together AI
 import { kv } from '@vercel/kv';
+import Together from "together-ai";
+
+const together = new Together({
+  apiKey: process.env.TOGETHER_API_KEY,
+});
 
 // Helper functions
 function generateRoomCode() {
@@ -40,34 +45,30 @@ async function deleteRoom(roomCode) {
 
 async function getAIJudgeFeedback(gameData) {
   try {
-    // You can replace this with any free AI API
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` // Optional
-      },
-      body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
-        messages: [{
-          role: 'user',
-          content: `You're a hilarious judge in a dev team game. Two teams explained "${gameData.term.en}":
+    const response = await together.chat.completions.create({
+      model: "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+      messages: [{
+        role: "system",
+        content: "You're a hilarious, witty judge for a tech team game called 'Explain It Like I'm 5'. Your job is to give funny, entertaining feedback on team explanations of tech concepts. Be playful, use emojis, make jokes, but keep it professional and PG-rated. Always pick a winner and explain why in a humorous way. Keep your response engaging and not too long - think of it as entertaining commentary that will make people laugh!"
+      }, {
+        role: "user",
+        content: `Two teams explained "${gameData.term.en || gameData.term}":
 Team ${gameData.team1Name}: "${gameData.team1Explanation}"
 Team ${gameData.team2Name}: "${gameData.team2Explanation}"
 Give funny, short feedback and decide the winner!`
-        }],
-        max_tokens: 200
-      })
+      }],
+      max_tokens: 200,
+      temperature: 0.8 // Make it more creative and fun
     });
     
-    const data = await response.json();
-    return data.choices[0].message.content;
+    return response.choices[0].message.content;
   } catch (error) {
+    console.error('AI Judge Error:', error);
     return "The AI judge is having coffee! ☕ Both teams did great - you decide the winner!";
   }
 }
 
-// Main handler function
+// Main handlers
 export async function GET(request, { params }) {
   return handler(request, { params });
 }
@@ -240,7 +241,7 @@ async function handler(req, { params }) {
           room.lastUpdate = Date.now();
           await setRoom(roomCode, room);
           
-          // Get AI feedback
+          // Get AI feedback using Together AI
           const judgeResponse = await getAIJudgeFeedback({
             term: room.currentTerm,
             team1Name: room.teamNames.team1,
