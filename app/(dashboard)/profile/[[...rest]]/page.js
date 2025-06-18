@@ -1,11 +1,8 @@
-// app/profile/[[...rest]]/page.js
-
-import { UserProfile } from "@clerk/nextjs";
-
 const ProfilePage = () => {
   return (
     <div>
-      <UserProfile />
+      <h1>User Profile</h1>
+      <p>This is a placeholder profile page. Authentication has been removed.</p>
     </div>
   );
 };
