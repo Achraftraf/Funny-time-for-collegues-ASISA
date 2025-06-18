@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import Together from "together-ai";
-import { auth } from "@clerk/nextjs/server";
 
 const together = new Together({
   apiKey: process.env.TOGETHER_API_KEY,
@@ -8,7 +7,8 @@ const together = new Together({
 
 export async function POST(req) {
   const body = await req.json();
-  const { userId } = auth(req);
+  // Removed Clerk auth usage
+  // const { userId } = auth(req);
   const userMessage = body.message;
   const chatHistory = body.chatHistory || [];
 
@@ -31,8 +31,8 @@ export async function POST(req) {
         },
         ...chatHistory,
       ],
-      max_tokens: 500, // Limit response length for game feedback
-      temperature: 0.8, // Make it more creative and fun
+      max_tokens: 500,
+      temperature: 0.8,
     });
 
     const assistantMessage = response.choices[0].message.content;
