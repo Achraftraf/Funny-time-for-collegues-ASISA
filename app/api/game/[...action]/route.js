@@ -1,6 +1,17 @@
-// app/api/game/[...action]/route.js - With Vercel KV Storage and Together AI
-import { kv } from '@vercel/kv';
+// app/api/game/[...action]/route.js - With Supabase and Together AI
+import { createClient } from '@supabase/supabase-js';
 import Together from "together-ai";
+
+// Initialize Supabase (fallback to memory if not configured)
+let supabase = null;
+const memoryStore = new Map();
+
+if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+  supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
+}
 
 const together = new Together({
   apiKey: process.env.TOGETHER_API_KEY,
@@ -14,32 +25,76 @@ function generateRoomCode() {
 // Storage functions
 async function getRoom(roomCode) {
   try {
-    const room = await kv.get(`room:${roomCode}`);
-    return room;
+    if (supabase) {
+      // Try Supabase first
+      const { data, error } = await supabase
+        .from('rooms')
+        .select('*')
+        .eq('code', roomCode)
+        .single();
+      
+      if (!error && data) {
+        return JSON.parse(data.room_data);
+      }
+    }
+    
+    // Fallback to memory store
+    return memoryStore.get(`room:${roomCode}`) || null;
   } catch (error) {
     console.error('Error getting room:', error);
-    return null;
+    return memoryStore.get(`room:${roomCode}`) || null;
   }
 }
 
 async function setRoom(roomCode, room) {
   try {
-    // Set room data with 24 hour expiration
-    await kv.setex(`room:${roomCode}`, 86400, room);
+    if (supabase) {
+      // Try Supabase first
+      const { error } = await supabase
+        .from('rooms')
+        .upsert({
+          code: roomCode,
+          room_data: JSON.stringify(room),
+          updated_at: new Date().toISOString()
+        });
+      
+      if (!error) {
+        return true;
+      }
+    }
+    
+    // Fallback to memory store
+    memoryStore.set(`room:${roomCode}`, room);
+    
+    // Auto-cleanup after 24 hours
+    setTimeout(() => {
+      memoryStore.delete(`room:${roomCode}`);
+    }, 86400000);
+    
     return true;
   } catch (error) {
     console.error('Error setting room:', error);
-    return false;
+    // Always fallback to memory
+    memoryStore.set(`room:${roomCode}`, room);
+    return true;
   }
 }
 
 async function deleteRoom(roomCode) {
   try {
-    await kv.del(`room:${roomCode}`);
+    if (supabase) {
+      await supabase
+        .from('rooms')
+        .delete()
+        .eq('code', roomCode);
+    }
+    
+    memoryStore.delete(`room:${roomCode}`);
     return true;
   } catch (error) {
     console.error('Error deleting room:', error);
-    return false;
+    memoryStore.delete(`room:${roomCode}`);
+    return true;
   }
 }
 
@@ -58,13 +113,27 @@ Team ${gameData.team2Name}: "${gameData.team2Explanation}"
 Give funny, short feedback and decide the winner!`
       }],
       max_tokens: 200,
-      temperature: 0.8 // Make it more creative and fun
+      temperature: 0.8
     });
     
     return response.choices[0].message.content;
   } catch (error) {
     console.error('AI Judge Error:', error);
     return "The AI judge is having coffee! ☕ Both teams did great - you decide the winner!";
+  }
+}
+
+// Utility function to safely parse JSON
+async function safeParseJSON(request) {
+  try {
+    const text = await request.text();
+    if (!text || text.trim() === '') {
+      return {};
+    }
+    return JSON.parse(text);
+  } catch (error) {
+    console.error('JSON parsing error:', error);
+    return {};
   }
 }
 
@@ -82,10 +151,18 @@ async function handler(req, { params }) {
   const method = req.method;
   
   try {
-    // Parse request body for POST requests
+    // Parse request body for POST requests with better error handling
     let body = {};
     if (method === 'POST') {
-      body = await req.json();
+      body = await safeParseJSON(req);
+      
+      // Validate that we have the required data
+      if (Object.keys(body).length === 0) {
+        return Response.json({ 
+          error: 'Invalid or empty request body',
+          details: 'Make sure you\'re sending valid JSON data'
+        }, { status: 400 });
+      }
     }
 
     // Handle the action array - get the first element as the main action
@@ -95,6 +172,15 @@ async function handler(req, { params }) {
       case 'create-room':
         if (method === 'POST') {
           const { playerName, playerId } = body;
+          
+          // Validate required fields
+          if (!playerName || !playerId) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['playerName', 'playerId']
+            }, { status: 400 });
+          }
+          
           const roomCode = generateRoomCode();
           
           const room = {
@@ -123,6 +209,14 @@ async function handler(req, { params }) {
       case 'join-room':
         if (method === 'POST') {
           const { roomCode, playerName, playerId } = body;
+          
+          if (!roomCode || !playerName || !playerId) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerName', 'playerId']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room) {
@@ -146,6 +240,14 @@ async function handler(req, { params }) {
       case 'join-team':
         if (method === 'POST') {
           const { roomCode, playerId, teamNumber } = body;
+          
+          if (!roomCode || !playerId || !teamNumber) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId', 'teamNumber']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room) {
@@ -177,6 +279,14 @@ async function handler(req, { params }) {
       case 'start-game':
         if (method === 'POST') {
           const { roomCode, playerId, term, team1Name, team2Name } = body;
+          
+          if (!roomCode || !playerId || !term) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId', 'term']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room || room.host !== playerId) {
@@ -201,6 +311,14 @@ async function handler(req, { params }) {
       case 'submit-explanation':
         if (method === 'POST') {
           const { roomCode, playerId, team, explanation } = body;
+          
+          if (!roomCode || !playerId || !team || !explanation) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId', 'team', 'explanation']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room) {
@@ -231,6 +349,14 @@ async function handler(req, { params }) {
       case 'request-judging':
         if (method === 'POST') {
           const { roomCode, playerId } = body;
+          
+          if (!roomCode || !playerId) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room || room.host !== playerId) {
@@ -262,6 +388,14 @@ async function handler(req, { params }) {
       case 'award-points':
         if (method === 'POST') {
           const { roomCode, playerId, team } = body;
+          
+          if (!roomCode || !playerId || !team) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId', 'team']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room || room.host !== playerId) {
@@ -279,6 +413,14 @@ async function handler(req, { params }) {
       case 'next-round':
         if (method === 'POST') {
           const { roomCode, playerId, term } = body;
+          
+          if (!roomCode || !playerId || !term) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId', 'term']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room || room.host !== playerId) {
@@ -301,6 +443,14 @@ async function handler(req, { params }) {
       case 'reset-game':
         if (method === 'POST') {
           const { roomCode, playerId } = body;
+          
+          if (!roomCode || !playerId) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room || room.host !== playerId) {
@@ -323,6 +473,11 @@ async function handler(req, { params }) {
       case 'get-room':
         if (method === 'GET') {
           const roomCode = action[1];
+          
+          if (!roomCode) {
+            return Response.json({ error: 'Room code required' }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room) {
@@ -342,6 +497,14 @@ async function handler(req, { params }) {
       case 'leave-room':
         if (method === 'POST') {
           const { roomCode, playerId } = body;
+          
+          if (!roomCode || !playerId) {
+            return Response.json({ 
+              error: 'Missing required fields',
+              required: ['roomCode', 'playerId']
+            }, { status: 400 });
+          }
+          
           const room = await getRoom(roomCode);
           
           if (!room) {
@@ -376,7 +539,10 @@ async function handler(req, { params }) {
     }
   } catch (error) {
     console.error('API Error:', error);
-    return Response.json({ error: 'Internal server error' }, { status: 500 });
+    return Response.json({ 
+      error: 'Internal server error',
+      message: error.message 
+    }, { status: 500 });
   }
 
   // If no case matched, return 404
