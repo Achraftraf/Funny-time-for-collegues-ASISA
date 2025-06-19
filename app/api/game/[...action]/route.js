@@ -54,37 +54,105 @@ async function getRoom(roomCode) {
   }
 }
 
+// Replace the setRoom function in your route.js file with this improved version
+
 async function setRoom(roomCode, room) {
   try {
     if (supabase) {
-      const { error } = await supabase
+      // First, try to update existing room
+      const { data: existingRoom, error: selectError } = await supabase
         .from('rooms')
-        .upsert({
-          code: roomCode,
-          room_data: JSON.stringify(room),
-          updated_at: new Date().toISOString()
-        });
-      
-      if (!error) {
-        // Also store in memory as backup
-        memoryStore.set(`room:${roomCode}`, room);
-        return true;
+        .select('code')
+        .eq('code', roomCode)
+        .single();
+
+      if (existingRoom) {
+        // Room exists, update it
+        const { error: updateError } = await supabase
+          .from('rooms')
+          .update({
+            room_data: JSON.stringify(room),
+            updated_at: new Date().toISOString()
+          })
+          .eq('code', roomCode);
+
+        if (!updateError) {
+          // Also store in memory as backup
+          memoryStore.set(`room:${roomCode}`, room);
+          return true;
+        } else {
+          console.error('Supabase update error:', updateError);
+        }
       } else {
-        console.error('Supabase upsert error:', error);
+        // Room doesn't exist, insert it
+        const { error: insertError } = await supabase
+          .from('rooms')
+          .insert({
+            code: roomCode,
+            room_data: JSON.stringify(room),
+            updated_at: new Date().toISOString()
+          });
+
+        if (!insertError) {
+          // Also store in memory as backup
+          memoryStore.set(`room:${roomCode}`, room);
+          return true;
+        } else {
+          console.error('Supabase insert error:', insertError);
+        }
       }
     }
     
     // Fallback to memory store
     memoryStore.set(`room:${roomCode}`, room);
-    
-    // Note: setTimeout won't work reliably on Vercel serverless
-    // Consider using a different cleanup strategy
     return true;
   } catch (error) {
     console.error('Error setting room:', error);
     memoryStore.set(`room:${roomCode}`, room);
     return true;
   }
+}
+
+// Alternative approach: Add retry logic with exponential backoff
+async function setRoomWithRetry(roomCode, room, maxRetries = 3) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      if (supabase) {
+        const { error } = await supabase
+          .from('rooms')
+          .upsert({
+            code: roomCode,
+            room_data: JSON.stringify(room),
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'code',
+            ignoreDuplicates: false
+          });
+        
+        if (!error) {
+          memoryStore.set(`room:${roomCode}`, room);
+          return true;
+        } else if (error.code === '23505' && attempt < maxRetries - 1) {
+          // Wait with exponential backoff before retry
+          await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt)));
+          continue;
+        } else {
+          console.error(`Supabase upsert error (attempt ${attempt + 1}):`, error);
+        }
+      }
+      
+      // Fallback to memory store
+      memoryStore.set(`room:${roomCode}`, room);
+      return true;
+    } catch (error) {
+      console.error(`Error setting room (attempt ${attempt + 1}):`, error);
+      if (attempt === maxRetries - 1) {
+        memoryStore.set(`room:${roomCode}`, room);
+        return true;
+      }
+    }
+  }
+  return true;
 }
 
 async function deleteRoom(roomCode) {
